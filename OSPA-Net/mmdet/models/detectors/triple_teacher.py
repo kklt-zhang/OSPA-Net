@@ -14,40 +14,8 @@ from mmdet.structures.bbox import bbox_project, bbox_overlaps
 from mmdet.utils import OptConfigType
 from mmcv.ops import nms
 
-
 @MODELS.register_module()
 class TripleTeacher(SemiBaseDetector):
-    """
-    TripleTeacher for SAR100 ship detection.
-
-    整体思想：
-        两个语义教师 + 一个物理教师。
-
-    分支 1：
-        self.student / self.teacher
-        Optical cross-domain branch
-        用 DIOR optical ship 数据初始化。
-        主要学习船舶轮廓、尺度、语义结构。
-
-    分支 2：
-        self.student2 / self.teacher2
-        SAR semi-supervised branch
-        用 DIOR + SAR100 labeled 初始化。
-        最终推理默认使用 teacher2。
-
-    分支 3：
-        Physical Arbitration Teacher, PAT
-        非参数物理教师。
-        它不直接预测类别和框，而是根据 SAR 图像的物理证据，
-        对候选框计算 physical reliability score。
-
-    改进版核心：
-        1. SAR teacher 是主教师；
-        2. Optical teacher 只是辅助候选来源；
-        3. Optical-only box 必须经过更严格物理审核；
-        4. Optical 和 SAR 一致的框会被增强；
-        5. Physical mining 延迟开启，并限制数量。
-    """
 
     def __init__(self,
                  detector1: dict,
@@ -56,27 +24,7 @@ class TripleTeacher(SemiBaseDetector):
                  semi_train_cfg: OptConfigType = None,
                  semi_test_cfg: OptConfigType = None,
                  **kwargs):
-        """
-        detector1:
-            optical branch 的 detector 配置。
 
-        detector2:
-            SAR branch 的 detector 配置。
-
-        physics_cfg:
-            物理教师相关超参数。
-
-        semi_train_cfg:
-            半监督训练超参数。
-
-        semi_test_cfg:
-            推理时选择 teacher / student / teacher2 / student2。
-        """
-
-        # SemiBaseDetector 内部会建立：
-        #   self.student
-        #   self.teacher
-        # 这里对应 optical branch。
         super().__init__(
             detector=detector1,
             semi_train_cfg=semi_train_cfg,
@@ -84,18 +32,11 @@ class TripleTeacher(SemiBaseDetector):
             **kwargs
         )
 
-        # 手动建立第二个 teacher-student 分支：
-        #   self.student2
-        #   self.teacher2
-        # 对应 SAR branch。
         self.student2 = MODELS.build(detector2)
         self.teacher2 = copy.deepcopy(self.student2)
 
-        # teacher2 只通过 EMA 更新，不参与反向传播，并始终保持 eval。
         self.freeze(self.teacher2)
 
-        # 物理教师默认配置。
-        # 如果 config 里传入 physics_cfg，会覆盖这里。
         self.physics_cfg = physics_cfg or dict(
             alpha=1.2,
             beta=0.8,
@@ -109,8 +50,6 @@ class TripleTeacher(SemiBaseDetector):
             fusion_nms_thr=0.30,
             fusion_nms_thr_by_scale=(0.30, 0.45, 0.55),
 
-            # COCO bbox-area boundaries in the original image:
-            # small < 32^2, medium < 96^2, large >= 96^2.
             scale_area_thr=(32.0 ** 2, 96.0 ** 2),
 
             tau_phys_agree=0.35,
@@ -151,66 +90,29 @@ class TripleTeacher(SemiBaseDetector):
         )
 
     def train(self, mode: bool = True):
-        """Keep both EMA teachers in evaluation mode during training."""
+
         super().train(mode)
         self.teacher.eval()
         self.teacher2.eval()
         return self
 
-    # ------------------------------------------------------------------ #
-    # 1. EMA update
-    # ------------------------------------------------------------------ #
     @torch.no_grad()
     def momentum_update(self, momentum: float) -> None:
-        """
-        同时更新两个 teacher。
 
-        普通 Mean Teacher：
-            teacher <- EMA(student)
-
-        这里有两个分支：
-            teacher  <- EMA(student)
-            teacher2 <- EMA(student2)
-
-        注意：
-            你的 DualMeanTeacherHook 必须调用 model.momentum_update(momentum)。
-            如果 hook 只写死更新 self.teacher，那么 teacher2 不会更新。
-        """
-
-        # 更新 optical teacher
         for src, dst in zip(self.student.parameters(), self.teacher.parameters()):
             dst.data.mul_(momentum).add_(src.data, alpha=1 - momentum)
 
-        # 更新 SAR teacher
         for src, dst in zip(self.student2.parameters(), self.teacher2.parameters()):
             dst.data.mul_(momentum).add_(src.data, alpha=1 - momentum)
 
-        # 同步 buffer，例如 BN running_mean / running_var
         for src, dst in zip(self.student.buffers(), self.teacher.buffers()):
             dst.data.copy_(src.data)
 
         for src, dst in zip(self.student2.buffers(), self.teacher2.buffers()):
             dst.data.copy_(src.data)
 
-    # ------------------------------------------------------------------ #
-    # 2. Physical Teacher: basic image processing
-    # ------------------------------------------------------------------ #
     @torch.no_grad()
     def _to_gray_norm(self, img: Tensor) -> Tensor:
-        """
-        将输入图像转换为 [0,1] 灰度图。
-
-        img:
-            [C, H, W]
-
-        return:
-            gray:
-                [1, H, W]
-
-        说明：
-            如果 SAR100 图像是单通道，直接使用。
-            如果是三通道伪 RGB，则取均值转灰度。
-        """
 
         if img.size(0) == 1:
             gray = img
@@ -227,16 +129,6 @@ class TripleTeacher(SemiBaseDetector):
 
     @torch.no_grad()
     def _sobel_edge(self, gray: Tensor) -> Tensor:
-        """
-        计算 Sobel 边缘响应。
-
-        gray:
-            [1, H, W]
-
-        return:
-            edge:
-                [1, H, W], normalized to [0,1]
-        """
 
         device = gray.device
         dtype = gray.dtype
@@ -262,7 +154,6 @@ class TripleTeacher(SemiBaseDetector):
         gx = F.conv2d(x, kx, padding=1)
         gy = F.conv2d(x, ky, padding=1)
 
-        # 不在 sqrt 内加入常量基线，否则常量图像会得到接近 1 的边缘图。
         edge = torch.sqrt(gx.square() + gy.square()).squeeze(0)
         edge = edge / edge.amax().clamp_min(1e-6)
 
@@ -275,12 +166,6 @@ class TripleTeacher(SemiBaseDetector):
                      y1: int,
                      x2: int,
                      y2: int) -> Tensor:
-        """
-        安全裁剪区域，避免越界。
-
-        img:
-            [1, H, W]
-        """
 
         H, W = img.shape[-2:]
 
@@ -291,48 +176,12 @@ class TripleTeacher(SemiBaseDetector):
 
         return img[:, y1:y2, x1:x2]
 
-    # ------------------------------------------------------------------ #
-    # 3. Physical Teacher: box-level physical score
-    # ------------------------------------------------------------------ #
     @torch.no_grad()
     def compute_box_physical_scores(self,
                                     img: Tensor,
                                     boxes: Tensor,
                                     gray: Tensor = None,
                                     edge: Tensor = None) -> Tuple[Tensor, dict]:
-        """
-        对一张 SAR 图像中的候选框计算物理可信度。
-
-        img:
-            [C, H, W]
-
-        boxes:
-            [N, 4], xyxy，当前图像坐标系下的 boxes。
-
-        return:
-            phys_scores:
-                [N]
-
-            components:
-                dict(
-                    C_local,
-                    S_structure,
-                    B_complexity
-                )
-
-        物理教师公式：
-            P_phys = sigmoid(
-                alpha * (2C - 1) + beta * (2S - 1) - gamma * B)
-
-        C_local:
-            候选框内部亮度/峰值相对于周围背景的差异。
-
-        S_structure:
-            候选框内部边缘、亮斑密度、长宽比结构响应。
-
-        B_complexity:
-            周围背景复杂度。背景越复杂，候选框越不可靠。
-        """
 
         device = img.device
 
@@ -344,8 +193,6 @@ class TripleTeacher(SemiBaseDetector):
                 B_complexity=empty
             )
 
-        # 同一张图会依次计算 SAR/optical/fused/proposal 框。允许调用方缓存
-        # gray 和 edge，避免重复执行归一化与 Sobel。
         if gray is None:
             gray = self._to_gray_norm(img)
         if edge is None:
@@ -360,7 +207,6 @@ class TripleTeacher(SemiBaseDetector):
         s_list = []
         b_list = []
 
-        # 一次性同步到 CPU，避免每个 box.tolist() 都触发一次 GPU 同步。
         boxes_cpu = boxes.detach().float().cpu().tolist()
 
         for x1, y1, x2, y2 in boxes_cpu:
@@ -368,9 +214,6 @@ class TripleTeacher(SemiBaseDetector):
             bw = max(x2 - x1, 1.0)
             bh = max(y2 - y1, 1.0)
 
-            # ----------------------------------------------------------
-            # 3.1 候选框内部区域 R_in
-            # ----------------------------------------------------------
             xi1 = int(round(x1))
             yi1 = int(round(y1))
             xi2 = int(round(x2))
@@ -379,12 +222,6 @@ class TripleTeacher(SemiBaseDetector):
             inside = self._crop_region(gray, xi1, yi1, xi2, yi2)
             inside_edge = self._crop_region(edge, xi1, yi1, xi2, yi2)
 
-            # ----------------------------------------------------------
-            # 3.2 候选框外扩背景环区域 R_bg
-            #
-            # outer = expand(box)
-            # R_bg = outer - inside
-            # ----------------------------------------------------------
             cx = 0.5 * (x1 + x2)
             cy = 0.5 * (y1 + y2)
 
@@ -396,7 +233,6 @@ class TripleTeacher(SemiBaseDetector):
             ex2 = int(round(cx + ew / 2))
             ey2 = int(round(cy + eh / 2))
 
-            # 实际裁剪坐标
             ox1 = max(0, min(ex1, W - 1))
             oy1 = max(0, min(ey1, H - 1))
             ox2 = max(ox1 + 1, min(ex2, W))
@@ -407,7 +243,6 @@ class TripleTeacher(SemiBaseDetector):
 
             oh, ow = outer.shape[-2:]
 
-            # 构造背景环 mask
             mask = torch.ones((oh, ow), device=device, dtype=torch.bool)
 
             ix1 = max(0, xi1 - ox1)
@@ -421,42 +256,30 @@ class TripleTeacher(SemiBaseDetector):
             bg_pixels = outer[0][mask]
             bg_edge_pixels = outer_edge[0][mask]
 
-            # 如果背景环太小，就退化为 outer 全部区域
             if bg_pixels.numel() < 4:
                 bg_pixels = outer.flatten()
                 bg_edge_pixels = outer_edge.flatten()
 
-            # ----------------------------------------------------------
-            # 3.3 C_local：局部对比度
-            # ----------------------------------------------------------
             mu_in = inside.mean()
             max_in = inside.max()
 
             mu_bg = bg_pixels.mean()
-            # unbiased=False 可避免单像素区域产生 NaN。
+
             std_bg = bg_pixels.std(unbiased=False).clamp(min=eps)
 
             c_mean = (mu_in - mu_bg) / (std_bg + eps)
             c_peak = (max_in - mu_bg) / (std_bg + eps)
 
-            # 均值差异 + 峰值差异
             c_raw = 0.6 * c_mean + 0.4 * c_peak
             c_score = torch.sigmoid(c_raw / 2.0)
 
-            # ----------------------------------------------------------
-            # 3.4 S_structure：结构响应
-            # ----------------------------------------------------------
-
-            # 内部边缘是否比背景边缘更明显
             edge_in = inside_edge.mean()
             edge_bg = bg_edge_pixels.mean() if bg_edge_pixels.numel() > 0 else outer_edge.mean()
             edge_score = torch.sigmoid(5.0 * (edge_in - edge_bg))
 
-            # 框内显著亮斑密度
             bright_thr = (mu_bg + 1.5 * std_bg).clamp(0, 1)
             bright_density = (inside > bright_thr).float().mean()
 
-            # 长宽比先验：船常具有一定细长结构
             aspect = max(bw / bh, bh / bw)
             aspect_tensor = torch.tensor(aspect, device=device, dtype=gray.dtype)
             shape_score = torch.clamp((aspect_tensor - 1.0) / 4.0, 0, 1)
@@ -467,9 +290,6 @@ class TripleTeacher(SemiBaseDetector):
                 0.20 * shape_score
             )
 
-            # ----------------------------------------------------------
-            # 3.5 B_complexity：背景复杂度
-            # ----------------------------------------------------------
             bg_std_score = bg_pixels.std(unbiased=False).clamp(0, 1)
             bg_edge_score = bg_edge_pixels.mean().clamp(0, 1)
             bg_bright_density = (bg_pixels > bright_thr).float().mean()
@@ -492,8 +312,6 @@ class TripleTeacher(SemiBaseDetector):
         beta = self.physics_cfg.get('beta', 0.8)
         gamma = self.physics_cfg.get('gamma', 0.8)
 
-        # C/S 的 0.5 表示“无正负证据”，必须先中心化。旧公式直接使用
-        # [0,1] 分量，导致空白区域也天然得到偏高分数。
         c_evidence = 2.0 * C_local - 1.0
         s_evidence = 2.0 * S_structure - 1.0
 
@@ -513,12 +331,7 @@ class TripleTeacher(SemiBaseDetector):
     def _box_scale_ids(self,
                        boxes: Tensor,
                        scale_factor=None) -> Tensor:
-        """Classify boxes as COCO small/medium/large in original pixels.
 
-        Teacher predictions are produced after Resize.  Dividing their area by
-        ``w_scale * h_scale`` maps the boxes back to the original-image area,
-        so the thresholds match the APs/APm/APl definitions used by CocoMetric.
-        """
         if boxes.numel() == 0:
             return torch.empty(
                 (0,), dtype=torch.long, device=boxes.device)
@@ -547,7 +360,7 @@ class TripleTeacher(SemiBaseDetector):
                          key: str,
                          scale_id: int,
                          fallback: float) -> float:
-        """Read a (small, medium, large) value with scalar fallback."""
+
         values = self.physics_cfg.get(key, None)
         if values is None:
             return float(fallback)
@@ -563,12 +376,7 @@ class TripleTeacher(SemiBaseDetector):
                          scores: Tensor,
                          scale_ids: Tensor,
                          fallback_thr: float) -> Tensor:
-        """NMS whose IoU threshold depends on the kept box scale.
 
-        Small objects retain the conservative threshold that produced strong
-        APs, while medium/large objects use less aggressive suppression to
-        avoid losing adjacent or elongated ships.
-        """
         if boxes.numel() == 0:
             return torch.empty(
                 (0,), dtype=torch.long, device=boxes.device)
@@ -596,9 +404,6 @@ class TripleTeacher(SemiBaseDetector):
 
         return torch.stack(keep)
 
-    # ------------------------------------------------------------------ #
-    # 4. Source-aware semantic fusion
-    # ------------------------------------------------------------------ #
     @torch.no_grad()
     def source_aware_fusion(self,
                             opt_boxes: Tensor,
@@ -611,27 +416,6 @@ class TripleTeacher(SemiBaseDetector):
                             scale_factor=None,
                             gray: Tensor = None,
                             edge: Tensor = None):
-        """
-        Source-aware semantic fusion.
-
-        原始初版：
-            optical boxes + SAR boxes -> concat + NMS
-
-        问题：
-            Optical teacher 和 SAR teacher 的 score 不可直接比较。
-            Optical teacher 在 SAR 图像上可能“高分错”。
-
-        改进：
-            SAR teacher 是主来源；
-            optical teacher 是辅助来源；
-            两个 teacher 一致时增强；
-            optical-only box 必须严格审核。
-
-        source:
-            0 = SAR-only
-            1 = Optical-only
-            2 = Agreed by optical teacher and SAR teacher
-        """
 
         device = img.device
 
@@ -691,7 +475,6 @@ class TripleTeacher(SemiBaseDetector):
         fused_labels = []
         fused_sources = []
 
-        # 一个 optical box 最多确认一个 SAR box，避免多对一重复匹配。
         matched_opt = torch.zeros(
             len(opt_boxes), dtype=torch.bool, device=device)
 
@@ -704,7 +487,6 @@ class TripleTeacher(SemiBaseDetector):
             else:
                 ious = None
 
-            # 高分 SAR 框优先获得 optical 匹配。
             sar_order = sar_scores.argsort(descending=True).detach().cpu().tolist()
             for idx in sar_order:
                 s_box = sar_boxes[idx]
@@ -749,8 +531,6 @@ class TripleTeacher(SemiBaseDetector):
                     o_box = opt_boxes[o_idx]
                     o_score = opt_scores[o_idx]
 
-                    # 默认保留 SAR teacher 坐标。Optical teacher 只提供
-                    # “是否存在目标”的一致性证据，不干扰 SAR 回归定位。
                     if keep_sar_box:
                         new_box = s_box
                     else:
@@ -778,7 +558,6 @@ class TripleTeacher(SemiBaseDetector):
                         fused_sources.append(
                             torch.tensor(0, device=device, dtype=torch.long))
 
-        # optical-only 默认关闭。需要消融时可以通过配置显式开启。
         if enable_optical_only and opt_boxes.numel() > 0:
             opt_phys, _ = self.compute_box_physical_scores(
                 img, opt_boxes, gray=gray, edge=edge)
@@ -792,9 +571,6 @@ class TripleTeacher(SemiBaseDetector):
                 o_phys = opt_phys[idx]
                 o_scale = int(opt_scale_ids[idx].item())
 
-                # Keep the successful small-object path untouched.  Optical
-                # only boxes may supplement large targets after both
-                # EMA teachers have stabilized.
                 if o_scale < optical_only_min_scale:
                     continue
 
@@ -823,7 +599,6 @@ class TripleTeacher(SemiBaseDetector):
         fused_labels = torch.stack(fused_labels, dim=0)
         fused_sources = torch.stack(fused_sources, dim=0)
 
-        # 最后做 NMS，并进行统一的最低伪标签分数过滤。
         fused_scale_ids = self._box_scale_ids(fused_boxes, scale_factor)
         keep = self._scale_aware_nms(
             fused_boxes, fused_scores, fused_scale_ids, nms_thr)
@@ -833,8 +608,6 @@ class TripleTeacher(SemiBaseDetector):
         fused_labels = fused_labels[keep]
         fused_sources = fused_sources[keep]
 
-        # optical-only 已经过独立的高语义/物理门槛，避免其降权分数被
-        # 统一阈值再次全部删除。
         score_keep = (
             (fused_sources == 1) | (fused_scores >= final_score_thr))
         fused_boxes = fused_boxes[score_keep]
@@ -845,27 +618,13 @@ class TripleTeacher(SemiBaseDetector):
         if fused_boxes.numel() == 0:
             return empty_result()
 
-        # 对最终保留框重新计算物理分数
         fused_phys, _ = self.compute_box_physical_scores(
             img, fused_boxes, gray=gray, edge=edge)
 
         return fused_boxes, fused_scores, fused_labels, fused_sources, fused_phys
 
-    # ------------------------------------------------------------------ #
-    # 5. Dynamic thresholds
-    # ------------------------------------------------------------------ #
     @torch.no_grad()
     def _update_dynamic_thresholds(self):
-        """
-        更新 physical mining 的动态阈值。
-
-        当前改进版中：
-            tau_high: 0.72 -> 0.82
-
-        作用：
-            用于 physical mining。
-            训练越往后，挖掘越严格。
-        """
 
         message_hub = MessageHub.get_current_instance()
         current_iter = message_hub.get_info('iter') if message_hub else 0
@@ -882,57 +641,24 @@ class TripleTeacher(SemiBaseDetector):
 
         return tau_high
 
-    # ------------------------------------------------------------------ #
-    # 6. Pseudo label generation
-    # ------------------------------------------------------------------ #
     @torch.no_grad()
     def get_pseudo_instances(self,
                              batch_inputs: Tensor,
                              batch_data_samples: list) -> Tuple[list, list]:
-        """
-        在 weak-aug unlabeled SAR 图像上生成两套伪标签。
 
-        输入：
-            batch_inputs:
-                unsup_teacher 分支图像，也就是 weak augmentation。
-
-            batch_data_samples:
-                unsup_teacher 分支的数据样本。
-
-        输出：
-            s1_samples:
-                clean pseudo labels for Optical Student S_o。
-
-            s2_samples:
-                augmented pseudo labels for SAR Student S_s。
-
-        流程：
-            1. Optical teacher T_o 预测；
-            2. SAR teacher T_s 预测；
-            3. source-aware fusion；
-            4. 生成 clean labels 给 S_o；
-            5. 物理挖掘 mined boxes；
-            6. clean + mined 生成 augmented labels 给 S_s；
-            7. weak-view 坐标映射回 original 坐标。
-        """
-
-        # 冻结参数不等于 eval；预测前显式固定两个 teacher 的状态。
         self.teacher.eval()
         self.teacher2.eval()
 
         tau_high = self._update_dynamic_thresholds()
 
-        # 两个 teacher 提取特征
         x1 = self.teacher.extract_feat(batch_inputs)
         x2 = self.teacher2.extract_feat(batch_inputs)
 
-        # Optical teacher 预测
         rpn_results1 = self.teacher.rpn_head.predict(
             x1, batch_data_samples, rescale=False)
         sem_results1 = self.teacher.roi_head.predict(
             x1, rpn_results1, batch_data_samples, rescale=False)
 
-        # SAR teacher 预测
         rpn_results2 = self.teacher2.rpn_head.predict(
             x2, batch_data_samples, rescale=False)
         sem_results2 = self.teacher2.roi_head.predict(
@@ -944,13 +670,9 @@ class TripleTeacher(SemiBaseDetector):
         for i in range(len(batch_data_samples)):
             device = batch_inputs.device
 
-            # 每张图只计算一次灰度图和 Sobel，后续所有候选框共享。
             gray = self._to_gray_norm(batch_inputs[i])
             edge = self._sobel_edge(gray)
 
-            # ----------------------------------------------------------
-            # 6.1 Source-aware semantic fusion
-            # ----------------------------------------------------------
             opt_boxes = sem_results1[i].bboxes
             opt_scores = sem_results1[i].scores
             opt_labels = sem_results1[i].labels
@@ -974,11 +696,6 @@ class TripleTeacher(SemiBaseDetector):
                     edge=edge,
                 )
 
-            # source-aware fusion 已经完成：
-            #   语义筛选
-            #   来源加权
-            #   物理审核
-            #   NMS
             base_bboxes = fused_boxes.clone()
             base_labels = fused_labels.clone()
             base_scores = fused_scores.clone()
@@ -992,13 +709,6 @@ class TripleTeacher(SemiBaseDetector):
                 base_is_mining = torch.zeros(0, dtype=torch.bool, device=device)
                 base_source = torch.zeros(0, dtype=torch.long, device=device)
 
-            # ----------------------------------------------------------
-            # 6.2 Clean pseudo labels for Optical Student S_o
-            #
-            # S_o 只吃 clean boxes，不吃 mined boxes。
-            # 目的：
-            #   保持 optical cross-domain branch 稳定。
-            # ----------------------------------------------------------
             inst_s1 = InstanceData()
             inst_s1.bboxes = base_bboxes.clone()
             inst_s1.labels = base_labels.clone()
@@ -1008,12 +718,6 @@ class TripleTeacher(SemiBaseDetector):
             inst_s1.source = base_source.clone()
             final_s1.append(inst_s1)
 
-            # ----------------------------------------------------------
-            # 6.3 Augmented pseudo labels for SAR Student S_s
-            #
-            # S_s 使用：
-            #   clean boxes + mined boxes
-            # ----------------------------------------------------------
             final_bboxes = base_bboxes.clone()
             final_labels = base_labels.clone()
             final_scores = base_scores.clone()
@@ -1021,16 +725,6 @@ class TripleTeacher(SemiBaseDetector):
             final_is_mining = base_is_mining.clone()
             final_source = base_source.clone()
 
-            # ----------------------------------------------------------
-            # 6.4 Physical mining
-            #
-            # 改进版：
-            #   1. 延迟开启；
-            #   2. 只从 SAR teacher RPN proposals 中挖；
-            #   3. 每张图最多挖 max_mined_boxes；
-            #   4. 标准 Faster R-CNN 不支持逐 GT 关闭回归，因此优化版
-            #      默认关闭 mining；只有显式 enable_mining=True 才会加入。
-            # ----------------------------------------------------------
             message_hub = MessageHub.get_current_instance()
             current_iter = message_hub.get_info('iter') if message_hub else 0
 
@@ -1058,7 +752,6 @@ class TripleTeacher(SemiBaseDetector):
                         mined_bboxes = rpn_boxes[mine_inds].clone()
                         mined_phys = rpn_phys[mine_inds].clone()
 
-                        # 去掉和 clean boxes 重叠太高的 mined boxes
                         if final_bboxes.numel() > 0 and mined_bboxes.numel() > 0:
                             ious = bbox_overlaps(mined_bboxes, final_bboxes)
                             max_ious, _ = ious.max(dim=1)
@@ -1067,7 +760,6 @@ class TripleTeacher(SemiBaseDetector):
                             mined_bboxes = mined_bboxes[new_mask]
                             mined_phys = mined_phys[new_mask]
 
-                        # mined boxes 内部 NMS
                         if mined_bboxes.numel() > 0:
                             _, keep_mine = nms(
                                 mined_bboxes,
@@ -1080,16 +772,14 @@ class TripleTeacher(SemiBaseDetector):
                             mined_bboxes = mined_bboxes[keep_mine]
                             mined_phys = mined_phys[keep_mine]
 
-                        # 构造 mined labels
                         if mined_bboxes.numel() > 0:
-                            # SAR100 ship subset 是单类检测，label 全部是 0
+
                             mined_labels = torch.zeros(
                                 len(mined_bboxes),
                                 dtype=torch.long,
                                 device=device
                             )
 
-                            # mined score 用物理分数代替
                             mined_scores = mined_phys.clamp(min=0.50, max=1.0)
 
                             mined_flags = torch.ones(
@@ -1098,7 +788,6 @@ class TripleTeacher(SemiBaseDetector):
                                 device=device
                             )
 
-                            # source=3 表示 physical mined box
                             mined_source = torch.full(
                                 (len(mined_bboxes),),
                                 3,
@@ -1119,9 +808,6 @@ class TripleTeacher(SemiBaseDetector):
                             final_source = torch.cat(
                                 [final_source, mined_source], dim=0)
 
-            # ----------------------------------------------------------
-            # 6.5 Final augmented pseudo labels for SAR Student S_s
-            # ----------------------------------------------------------
             inst_s2 = InstanceData()
             inst_s2.bboxes = final_bboxes
             inst_s2.labels = final_labels
@@ -1132,17 +818,6 @@ class TripleTeacher(SemiBaseDetector):
 
             final_s2.append(inst_s2)
 
-        # --------------------------------------------------------------
-        # 6.6 weak-view 坐标 -> original image 坐标
-        #
-        # teacher 在 weak augmentation 图像上预测，
-        # 后续 student 在 strong augmentation 图像上训练。
-        #
-        # 所以流程是：
-        #   weak-view -> original -> strong-view
-        #
-        # 这里先做 weak-view -> original。
-        # --------------------------------------------------------------
         s1_samples = []
         s2_samples = []
 
@@ -1181,20 +856,7 @@ class TripleTeacher(SemiBaseDetector):
 
         return s1_samples, s2_samples
 
-    # ------------------------------------------------------------------ #
-    # 7. Split supervised data
-    # ------------------------------------------------------------------ #
     def _split_sup_by_domain(self, sup_inputs: Tensor, sup_samples: list):
-        """
-        将 supervised batch 分成 optical 和 SAR 两组。
-
-        当前版本用 img_path 简单判断：
-            路径中包含 dior / optical -> optical
-            其他 -> SAR
-
-        后续更稳的方式：
-            在 dataset pipeline 里显式加入 domain 字段。
-        """
 
         optical_inputs, optical_samples = [], []
         sar_inputs, sar_samples = [], []
@@ -1224,23 +886,6 @@ class TripleTeacher(SemiBaseDetector):
 
     @torch.no_grad()
     def _pseudo_reg_reliability(self, pseudo_samples: list) -> Tensor:
-        """Estimate one batch-level reliability for pseudo-box regression.
-
-        The rule is shared by every labeled-data ratio.  It does not change
-        pseudo-label selection or classification loss.  It only asks how much
-        the accepted pseudo boxes should be trusted as coordinate targets.
-
-        Source ids produced by ``source_aware_fusion``:
-            0: SAR-only
-            1: optical-only
-            2: agreed by the optical and SAR teachers
-            3: physically mined
-
-        Agreement is the strongest localization evidence.  SAR-only boxes are
-        useful but receive a moderate prior.  Optical-only boxes are weak
-        coordinate targets in the SAR domain.  Mined boxes must not drive box
-        regression.
-        """
 
         if not self.semi_train_cfg.get(
                 'enable_adaptive_unsup_reg', False):
@@ -1276,8 +921,7 @@ class TripleTeacher(SemiBaseDetector):
             if hasattr(instances, 'source'):
                 source = instances.source.long().clamp(min=0, max=3)
             else:
-                # Backward-compatible fallback: fused pseudo boxes without a
-                # source field are treated as SAR-only, not as agreement.
+
                 source = torch.zeros(
                     num_boxes, dtype=torch.long, device=device)
 
@@ -1316,11 +960,9 @@ class TripleTeacher(SemiBaseDetector):
                                    loss_name: str,
                                    base_scale: float,
                                    reg_reliability: Tensor):
-        """Apply adaptive reliability only to unsupervised box regression."""
 
         loss_name = loss_name.lower()
 
-        # Metrics such as accuracy should be logged in their natural scale.
         if 'acc' in loss_name:
             return 1.0
 
@@ -1334,46 +976,23 @@ class TripleTeacher(SemiBaseDetector):
                 'unsup_roi_reg_reliability_power', 1.0))
             return base_scale * reg_reliability.pow(roi_power)
 
-        # Classification and all other unsupervised components are unchanged.
         return base_scale
 
-    # ------------------------------------------------------------------ #
-    # 8. Training loss
-    # ------------------------------------------------------------------ #
     def loss(self,
              multi_batch_inputs: dict,
              multi_batch_data_samples: dict) -> dict:
-        """
-        一次训练迭代的完整流程：
 
-        1. 从 unsup_teacher weak-view 生成伪标签；
-        2. 将伪标签从 weak-view 映射回 original；
-        3. 再映射到 unsup_student strong-view；
-        4. supervised batch 分成 optical / SAR；
-        5. S_o 学 optical supervised + clean unsup；
-        6. S_s 学 SAR supervised + augmented unsup。
-        """
-
-        # --------------------------------------------------------------
-        # 8.1 取出 unsup teacher/student 分支
-        # --------------------------------------------------------------
         unsup_teacher_inputs = multi_batch_inputs['unsup_teacher']
         unsup_teacher_samples = multi_batch_data_samples['unsup_teacher']
 
         unsup_student_inputs = multi_batch_inputs['unsup_student']
         unsup_student_samples = multi_batch_data_samples['unsup_student']
 
-        # --------------------------------------------------------------
-        # 8.2 生成两套伪标签
-        # --------------------------------------------------------------
         pseudo_s1, pseudo_s2 = self.get_pseudo_instances(
             unsup_teacher_inputs,
             unsup_teacher_samples
         )
 
-        # --------------------------------------------------------------
-        # 8.3 original 坐标 -> student strong-view 坐标
-        # --------------------------------------------------------------
         for ps1, ps2, student_sample in zip(
                 pseudo_s1, pseudo_s2, unsup_student_samples):
 
@@ -1397,10 +1016,8 @@ class TripleTeacher(SemiBaseDetector):
                     student_sample.img_shape
                 )
 
-            # 更新 student-view 的图像元信息
             meta_updates = dict(img_shape=student_sample.img_shape)
 
-            # 某些 metainfo 不一定存在，所以逐个判断。
             for key in ['ori_shape', 'scale_factor', 'flip', 'flip_direction']:
                 if key in student_sample.metainfo:
                     meta_updates[key] = student_sample.metainfo[key]
@@ -1408,7 +1025,6 @@ class TripleTeacher(SemiBaseDetector):
             ps1.set_metainfo(meta_updates)
             ps2.set_metainfo(meta_updates)
 
-            # 投影后过滤非有限、零面积和过小伪框，避免回归损失不稳定。
             min_w, min_h = self.semi_train_cfg.get(
                 'min_pseudo_bbox_wh', (1.0, 1.0))
             for pseudo_sample in (ps1, ps2):
@@ -1424,9 +1040,6 @@ class TripleTeacher(SemiBaseDetector):
                 )
                 pseudo_sample.gt_instances = instances[keep]
 
-        # --------------------------------------------------------------
-        # 8.4 supervised data split
-        # --------------------------------------------------------------
         sup_inputs = multi_batch_inputs['sup']
         sup_samples = multi_batch_data_samples['sup']
 
@@ -1435,13 +1048,6 @@ class TripleTeacher(SemiBaseDetector):
 
         total_loss = {}
 
-        # --------------------------------------------------------------
-        # 8.5 Loss weights
-        #
-        # 改进版原则：
-        #   SAR branch 是主分支；
-        #   Optical branch 是辅助分支。
-        # --------------------------------------------------------------
         opt_sup_weight = self.semi_train_cfg.get('opt_sup_weight', 0.3)
         opt_unsup_weight = self.semi_train_cfg.get('opt_unsup_weight', 0.25)
 
@@ -1450,12 +1056,8 @@ class TripleTeacher(SemiBaseDetector):
         sup_weight = self.semi_train_cfg.get('sup_weight', 1.0)
         unsup_weight = self.semi_train_cfg.get('unsup_weight', 0.5)
 
-        # --------------------------------------------------------------
-        # 8.6 S_o: optical supervised + clean unsupervised
-        # --------------------------------------------------------------
         loss_s1 = {}
 
-        # Optical supervised loss
         if optical_inputs is not None and len(optical_samples) > 0:
             loss_sup1 = self.student.loss(optical_inputs, optical_samples)
             for k, v in loss_sup1.items():
@@ -1466,8 +1068,6 @@ class TripleTeacher(SemiBaseDetector):
                     loss_s1[f'student1_sup_{k}'] = \
                         v * sup_weight * opt_sup_weight
 
-        # Optical branch unsupervised loss:
-        # S_o 只学习 clean pseudo labels。
         loss_unsup1 = self.student.loss(unsup_student_inputs, pseudo_s1)
         pseudo_count1 = sum(len(s.gt_instances) for s in pseudo_s1)
         unsup_scale1 = (
@@ -1483,12 +1083,8 @@ class TripleTeacher(SemiBaseDetector):
                 loss_s1[f'student1_unsup_{k}'] = v * component_scale
         loss_s1['student1_unsup_reg_reliability'] = reg_reliability1
 
-        # --------------------------------------------------------------
-        # 8.7 S_s: SAR supervised + augmented unsupervised
-        # --------------------------------------------------------------
         loss_s2 = {}
 
-        # SAR supervised loss
         if sar_inputs is not None and len(sar_samples) > 0:
             loss_sup2 = self.student2.loss(sar_inputs, sar_samples)
             for k, v in loss_sup2.items():
@@ -1499,8 +1095,6 @@ class TripleTeacher(SemiBaseDetector):
                     loss_s2[f'student2_sup_{k}'] = \
                         v * sup_weight * sar_sup_weight
 
-        # SAR branch unsupervised loss:
-        # S_s 学习 augmented pseudo labels = clean + mined。
         loss_unsup2 = self.student2.loss(unsup_student_inputs, pseudo_s2)
         pseudo_count2 = sum(len(s.gt_instances) for s in pseudo_s2)
         unsup_scale2 = (
@@ -1521,21 +1115,10 @@ class TripleTeacher(SemiBaseDetector):
 
         return total_loss
 
-    # ------------------------------------------------------------------ #
-    # 9. Inference
-    # ------------------------------------------------------------------ #
     def predict(self,
                 batch_inputs: Tensor,
                 batch_data_samples: list,
                 rescale: bool = True):
-        """
-        推理阶段。
-
-        默认：
-            predict_on='teacher2'
-
-        也就是最终使用 SAR teacher。
-        """
 
         if self.semi_test_cfg is None:
             predict_on = 'teacher2'
@@ -1558,6 +1141,5 @@ class TripleTeacher(SemiBaseDetector):
             return self.student.predict(
                 batch_inputs, batch_data_samples, rescale=rescale)
 
-        # 默认兜底：SAR teacher
         return self.teacher2.predict(
             batch_inputs, batch_data_samples, rescale=rescale)
