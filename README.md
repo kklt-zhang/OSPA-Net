@@ -48,9 +48,19 @@ Please install MMDetection 3.3.0 and place the configuration, detector, and hook
 
 We use the optical DIOR dataset and the SAR SARDet-100K dataset:
 
-DIOR: Paper | Dataset Homepage
+DIOR
 
-SARDet-100K: Paper | Dataset and Code
+Paper
+
+Dataset Download: Google Drive | Baidu Netdisk
+
+SARDet-100K
+
+Paper
+
+Dataset Download: Kaggle | Baidu Netdisk
+
+Official Repository
 
 Please organize the processed ship subsets as follows:
 
