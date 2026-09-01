@@ -50,17 +50,21 @@ We use the optical DIOR dataset and the SAR SARDet-100K dataset:
 
 DIOR
 
-Paper
+Paper: https://doi.org/10.1016/j.isprsjprs.2019.11.023
 
-Dataset Download: Google Drive | Baidu Netdisk
+Dataset Download (Google Drive): https://drive.google.com/drive/folders/1UdlgHk49iu6WpcJ5467iT-UqNPpx__CC
+
+Dataset Download (Baidu Netdisk): https://pan.baidu.com/s/1iLKT0JQoKXEJTGNxt5lSMg
 
 SARDet-100K
 
-Paper
+Paper: https://proceedings.neurips.cc/paper_files/paper/2024/hash/e7eb8128eb26eafbe901348df1dbacdc-Abstract-Conference.html
 
-Dataset Download: Kaggle | Baidu Netdisk
+Dataset Download (Kaggle): https://www.kaggle.com/datasets/greatbird/sardet-100k
 
-Official Repository
+Dataset Download (Baidu Netdisk): https://pan.baidu.com/s/1dIFOm4V2pM_AjhmkD1-Usw?pwd=SARD
+
+Official Repository: https://github.com/zcablii/SARDet_100K
 
 Please organize the processed ship subsets as follows:
 
@@ -113,7 +117,7 @@ If you find this project useful in your research, please consider citing our pap
 
 🙏 Acknowledgement
 
-This project is built upon MMDetection. The semisupervised detection implementation is inspired by SoftTeacher, while the cross-domain training pipeline benefits from the insights of Dual Teacher. We sincerely thank the authors of these projects for their valuable open-source contributions.
+This project is built upon the foundational framework of MMDetection. The semi-supervised detection implementation is mainly inspired by and adapted from SoftTeacher. We also acknowledge the valuable methodological insights provided by Dual Teacher for cross-domain semi-supervised ship detection. We sincerely thank the authors of these works for their outstanding open-source contributions and impactful research.
 
 ✉️ Contact
 
