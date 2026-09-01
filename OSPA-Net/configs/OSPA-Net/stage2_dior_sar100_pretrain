@@ -1,1 +1,93 @@
+_base_ = ['./stage1_dior_pretrain.py']
+
+dataset_type = 'CocoDataset'
+backend_args = None
+
+dior_root = '/home/zh/mmdetection/DIOR/dior_ship/'
+sar100_root = '/home/zh/mmdetection/data/sar100k/SARDet_100K/'
+
+metainfo = dict(classes=('ship',), palette=[(220, 20, 60)])
+
+reference_world_size = 4
+actual_world_size = 1
+assert reference_world_size % actual_world_size == 0
+iter_scale = reference_world_size // actual_world_size
+base_lr = 0.01 * actual_world_size / reference_world_size
+
+labeled_optical_dataset = dict(
+    type=dataset_type,
+    data_root=dior_root,
+    metainfo=metainfo,
+    ann_file='train.json',
+    data_prefix=dict(img='train/images/'),
+    filter_cfg=dict(filter_empty_gt=True, min_size=16),
+    pipeline=_base_.train_pipeline,
+    backend_args=backend_args,
+)
+
+labeled_sar_dataset = dict(
+    type=dataset_type,
+    data_root=sar100_root,
+    metainfo=metainfo,
+    ann_file='Annotations/instances_train_1percent.json',
+    data_prefix=dict(img='JPEGImages/train/'),
+    filter_cfg=dict(filter_empty_gt=True, min_size=16),
+    pipeline=_base_.train_pipeline,
+    backend_args=backend_args,
+)
+
+train_dataloader = dict(
+    batch_size=2,
+    num_workers=2,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=True),
+    dataset=dict(
+        _delete_=True,
+        type='ConcatDataset',
+        datasets=[labeled_optical_dataset, labeled_sar_dataset],
+    ),
+)
+
+max_iters = 1000 * iter_scale
+val_interval = 1000 * iter_scale
+train_cfg = dict(
+    type='IterBasedTrainLoop',
+    max_iters=max_iters,
+    val_interval=val_interval,
+)
+
+param_scheduler = [
+    dict(
+        type='LinearLR',
+        start_factor=0.001,
+        by_epoch=False,
+        begin=0,
+        end=500 * iter_scale,
+    ),
+]
+
+optim_wrapper = dict(
+    type='AmpOptimWrapper',
+    loss_scale='dynamic',
+    optimizer=dict(
+        type='SGD',
+        lr=base_lr,
+        momentum=0.9,
+        weight_decay=0.0001,
+    ),
+)
+auto_scale_lr = dict(enable=False, base_batch_size=8)
+
+default_hooks = dict(
+    checkpoint=dict(
+        type='CheckpointHook',
+        by_epoch=False,
+        interval=val_interval,
+        max_keep_ckpts=10,
+        save_last=True,
+    ),
+)
+
+load_from = None
+resume = False
 
