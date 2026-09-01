@@ -1,69 +1,110 @@
-OSPA-Net
+OSPA-Net: Optical–SAR Semantic Collaboration with Physics-Guided Arbitration for Semisupervised SAR Ship Detection
 
-Official implementation of OSPA-Net: Optical–SAR Semantic Collaboration with Physics-Guided Arbitration for Semisupervised SAR Ship Detection.
 
-The code is being organized. Detailed documentation, checkpoints, and experimental results will be added after the paper is accepted.
 
-Overview
 
-OSPA-Net is a SAR-centered semisupervised ship detection framework. It consists of two semantic teacher–student pairs and a parameter-free physical arbitration teacher. The optical branch provides transferable ship semantics, while the SAR branch performs target-domain learning and final inference. Physical evidence is used to verify teacher-agreed, SAR-only, and optical-only pseudo-label candidates.
 
-Main Files
+This is the official PyTorch implementation of "OSPA-Net: Optical–SAR Semantic Collaboration with Physics-Guided Arbitration for Semisupervised SAR Ship Detection."
 
-stage1_dior_pretrain.py: optical branch pretraining on DIOR ship images.
+📢 News
 
-stage2_dior_sar100_pretrain.py: SAR branch pretraining on labeled DIOR and SARDet-100K images.
+[2026.09] The initial code and training configurations of OSPA-Net are released.
 
-stage3_ospa_sar100_10percent.py: semisupervised OSPA-Net training configuration.
+Detailed documentation, checkpoints, and experimental results will be updated after the paper is accepted.
 
-sar100_10percent_dataset.py: labeled and unlabeled SARDet-100K data configuration.
+💡 Introduction
 
-triple_teacher.py: main OSPA-Net detector implementation.
+Existing semisupervised object detection methods usually select pseudo labels according to network-derived semantic confidence. In cluttered SAR scenes, however, semantic confidence alone may be unreliable. Directly transferring optical ship knowledge to the SAR domain may also introduce semantic and localization errors because of the substantial imaging discrepancy between the two modalities.
+
+To address these issues, we propose OSPA-Net, a SAR-centered semantic collaboration framework consisting of two trainable semantic teacher–student pairs and a parameter-free physical arbitration teacher:
+
+Optical Semantic Branch: provides transferable ship semantics learned from labeled DIOR images.
+
+SAR Semantic Branch: serves as the primary target-domain learning and detection branch.
+
+Physical Arbitration Teacher: evaluates candidate boxes using local contrast, structural response, and background complexity.
+
+Source- and Scale-Aware Pseudo-Label Generation: associates optical and SAR predictions, distinguishes teacher-agreed, SAR-only, and optical-only candidates, and verifies them using source-specific semantic and physical criteria.
+
+During inference, only the EMA SAR teacher is used.
+
+Usage
 
 Requirements
 
-The current implementation is based on:
+Python=3.8
 
-PyTorch
+PyTorch=2.0+
+
+MMCV=2.x
 
 MMEngine
 
-MMCV 2.x
+MMDetection=3.3.0
 
-MMDetection 3.3.0
+Please install MMDetection 3.3.0 and place the configuration, detector, and hook files in their corresponding MMDetection directories.
 
-Data Preparation
+📂 Data
 
-The code uses the DIOR ship subset and SARDet-100K ship subset. Update the dataset paths in the configuration files before training:
+We use the optical DIOR dataset and the SAR SARDet-100K dataset:
 
-dior_root = '/path/to/DIOR/dior_ship/'
-sar100_root = '/path/to/SARDet_100K/'
+DIOR: Paper | Dataset Homepage
 
-The annotations should follow COCO format.
+SARDet-100K: Paper | Dataset and Code
+
+Please organize the processed ship subsets as follows:
+
+data/
+├── DIOR/
+│   └── dior_ship/
+│       ├── train.json
+│       └── train/
+│           └── images/
+└── SARDet_100K/
+    ├── Annotations/
+    │   ├── instances_train_10percent.json
+    │   ├── instances_unlabeled_90percent.json
+    │   ├── val_ship.json
+    │   └── test_ship.json
+    └── JPEGImages/
+        ├── train/
+        ├── val/
+        └── test/
+
+Update dior_root and sar100_root in the configuration files according to your local paths.
+
+🚀 Getting Started
 
 Training
 
-Run the three training stages in sequence:
+OSPA-Net follows a three-stage training procedure.
+
+Stage 1: Pretrain the optical branch on DIOR
 
 python tools/train.py configs/ospa_net/stage1_dior_pretrain.py
+
+Stage 2: Pretrain the SAR branch on labeled DIOR and SARDet-100K images
+
 python tools/train.py configs/ospa_net/stage2_dior_sar100_pretrain.py
+
+Stage 3: Train OSPA-Net with labeled and unlabeled data
+
 python tools/train.py configs/ospa_net/stage3_ospa_sar100_10percent.py
 
-Before Stage 3, replace the checkpoint paths in the configuration file:
-
-stage1_checkpoint = '/path/to/stage1_checkpoint.pth'
-stage2_checkpoint = '/path/to/stage2_checkpoint.pth'
-
-Ensure that Stage 2 and Stage 3 use the same labeled-data ratio.
+Before Stage 3, replace stage1_checkpoint and stage2_checkpoint with the corresponding pretrained weights. Please also ensure that Stage 2 and Stage 3 use the same labeled-data ratio.
 
 Evaluation
 
-python tools/test.py \
-    configs/ospa_net/stage3_ospa_sar100_10percent.py \
-    /path/to/checkpoint.pth
+python tools/test.py configs/ospa_net/stage3_ospa_sar100_10percent.py /path/to/checkpoint.pth
 
-The EMA SAR teacher is used for inference by default.
+📝 Citation
 
-Acknowledgements
+If you find this project useful in your research, please consider citing our paper. The complete citation information will be updated after acceptance.
 
-This implementation is built on MMDetection.
+🙏 Acknowledgement
+
+This project is built upon MMDetection. The semisupervised detection implementation is inspired by SoftTeacher, while the cross-domain training pipeline benefits from the insights of Dual Teacher. We sincerely thank the authors of these projects for their valuable open-source contributions.
+
+✉️ Contact
+
+For any questions, please feel free to open an issue or contact kklt_zhang@dlmu.edu.cn.
