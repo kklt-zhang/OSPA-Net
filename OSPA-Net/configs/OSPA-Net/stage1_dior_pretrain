@@ -1,1 +1,199 @@
+_base_ = [
+    '../_base_/models/faster-rcnn_r50_fpn.py',
+    '../_base_/default_runtime.py',
+]
+
+dataset_type = 'CocoDataset'
+backend_args = None
+
+dior_root = '/home/zh/mmdetection/DIOR/dior_ship/'
+sar100_root = '/home/zh/mmdetection/data/sar100k/SARDet_100K/'
+
+metainfo = dict(classes=('ship',), palette=[(220, 20, 60)])
+
+reference_world_size = 4
+actual_world_size = 1
+assert reference_world_size % actual_world_size == 0
+iter_scale = reference_world_size // actual_world_size
+base_lr = 0.01 * actual_world_size / reference_world_size
+
+model = dict(
+    data_preprocessor=dict(
+        type='DetDataPreprocessor',
+        mean=[103.530, 116.280, 123.675],
+        std=[1.0, 1.0, 1.0],
+        bgr_to_rgb=False,
+        pad_size_divisor=32,
+    ),
+    backbone=dict(
+        type='ResNet',
+        depth=101,
+        num_stages=4,
+        out_indices=(0, 1, 2, 3),
+        frozen_stages=1,
+        norm_cfg=dict(type='BN', requires_grad=False),
+        norm_eval=True,
+        style='caffe',
+        init_cfg=dict(
+            type='Pretrained',
+            checkpoint='open-mmlab://detectron2/resnet101_caffe',
+        ),
+    ),
+    roi_head=dict(bbox_head=dict(num_classes=1)),
+)
+
+scale = [(1333, 400), (1333, 1200)]
+color_space = [
+    [dict(type='ColorTransform')],
+    [dict(type='AutoContrast')],
+    [dict(type='Equalize')],
+    [dict(type='Sharpness')],
+    [dict(type='Posterize')],
+    [dict(type='Solarize')],
+    [dict(type='Color')],
+    [dict(type='Contrast')],
+    [dict(type='Brightness')],
+]
+
+train_pipeline = [
+    dict(type='LoadImageFromFile', backend_args=backend_args),
+    dict(type='LoadAnnotations', with_bbox=True),
+    dict(type='RandomResize', scale=scale, keep_ratio=True),
+    dict(type='RandomFlip', prob=0.5),
+    dict(type='RandAugment', aug_space=color_space, aug_num=1),
+    dict(type='PackDetInputs'),
+]
+
+test_pipeline = [
+    dict(type='LoadImageFromFile', backend_args=backend_args),
+    dict(type='Resize', scale=(1333, 800), keep_ratio=True),
+    dict(
+        type='PackDetInputs',
+        meta_keys=(
+            'img_id',
+            'img_path',
+            'ori_shape',
+            'img_shape',
+            'scale_factor',
+        ),
+    ),
+]
+
+train_dataloader = dict(
+    batch_size=2,
+    num_workers=2,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=True),
+    dataset=dict(
+        type=dataset_type,
+        data_root=dior_root,
+        metainfo=metainfo,
+        ann_file='train.json',
+        data_prefix=dict(img='train/images/'),
+        filter_cfg=dict(filter_empty_gt=True, min_size=16),
+        pipeline=train_pipeline,
+        backend_args=backend_args,
+    ),
+)
+
+val_dataloader = dict(
+    batch_size=1,
+    num_workers=2,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=dict(
+        type=dataset_type,
+        data_root=sar100_root,
+        metainfo=metainfo,
+        ann_file='Annotations/val_ship.json',
+        data_prefix=dict(img='JPEGImages/val/'),
+        test_mode=True,
+        pipeline=test_pipeline,
+        backend_args=backend_args,
+    ),
+)
+
+test_dataloader = dict(
+    batch_size=1,
+    num_workers=2,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=dict(
+        type=dataset_type,
+        data_root=sar100_root,
+        metainfo=metainfo,
+        ann_file='Annotations/test_ship.json',
+        data_prefix=dict(img='JPEGImages/test/'),
+        test_mode=True,
+        pipeline=test_pipeline,
+        backend_args=backend_args,
+    ),
+)
+
+val_evaluator = dict(
+    type='CocoMetric',
+    ann_file=sar100_root + 'Annotations/val_ship.json',
+    metric='bbox',
+    classwise=True,
+    format_only=False,
+    backend_args=backend_args,
+)
+test_evaluator = dict(
+    type='CocoMetric',
+    ann_file=sar100_root + 'Annotations/test_ship.json',
+    metric='bbox',
+    classwise=True,
+    format_only=False,
+    backend_args=backend_args,
+)
+
+max_iters = 2000 * iter_scale
+val_interval = 200 * iter_scale
+train_cfg = dict(
+    type='IterBasedTrainLoop',
+    max_iters=max_iters,
+    val_interval=val_interval,
+)
+val_cfg = dict(type='ValLoop')
+test_cfg = dict(type='TestLoop')
+
+param_scheduler = [
+    dict(
+        type='LinearLR',
+        start_factor=0.001,
+        by_epoch=False,
+        begin=0,
+        end=500 * iter_scale,
+    ),
+]
+
+optim_wrapper = dict(
+    type='AmpOptimWrapper',
+    loss_scale='dynamic',
+    optimizer=dict(
+        type='SGD',
+        lr=base_lr,
+        momentum=0.9,
+        weight_decay=0.0001,
+    ),
+)
+auto_scale_lr = dict(enable=False, base_batch_size=8)
+
+default_hooks = dict(
+    checkpoint=dict(
+        type='CheckpointHook',
+        by_epoch=False,
+        interval=val_interval,
+        max_keep_ckpts=10,
+        save_last=True,
+    ),
+)
+
+log_processor = dict(type='LogProcessor', window_size=50, by_epoch=False)
+randomness = dict(seed=0, deterministic=False)
+
+load_from = None
+resume = False
 
